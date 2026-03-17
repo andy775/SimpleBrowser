@@ -1073,28 +1073,16 @@ async function corsFetch(url, options) {
         onStatus("Missing login parameters", false);
         return Promise.reject(error);
       }
-			  
-		const loginUrl = buildApiUrl(baseUrl, "token");
-		const response = await corsFetch(loginUrl, {
-		  method: "POST",
-		  headers: {
-			"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"
-		  },
-		  body: `grant_type=password&username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`
-		});
-
-		if (!response.ok) {
-		  throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-		}
-
-		const data = await response.json();
+      
+      const loginUrl = buildApiUrl(baseUrl, "token");
+      console.log("Login URL:", loginUrl);
       
       // Extra debug: log fetch options
-      //const fetchOptions = {
-      //  method: "POST",
-      //  headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      //  body: `grant_type=password&username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`
-      //};
+      const fetchOptions = {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8" },
+        body: `grant_type=password&username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`
+      };
       
       // CORS SUPPORT: Add credentials for cross-origin requests
       const currentOrigin = window.location.origin;
@@ -1102,8 +1090,8 @@ async function corsFetch(url, options) {
         const loginUrlObj = new URL(loginUrl, window.location.href);
         const loginOrigin = `${loginUrlObj.protocol}//${loginUrlObj.host}`;
         if (currentOrigin !== loginOrigin) {
-          fetchOptions.credentials = 'include'; // Include credentials for CORS
-          console.log('⚠️ Cross-origin login request - CORS credentials included');
+          fetchOptions.credentials = "include"; // Include credentials for CORS
+          console.log("⚠️ Cross-origin login request - CORS credentials included");
         }
       } catch (e) {
         // If URL parsing fails, assume same-origin
@@ -1111,6 +1099,174 @@ async function corsFetch(url, options) {
       
       console.log("Fetch options:", fetchOptions);
       
+      return corsFetch(loginUrl, fetchOptions)
+        .then(res => {
+          console.log("Login response status:", res.status);
+          console.log("Login response headers:", Object.fromEntries(res.headers.entries()));
+          // Extra debug: try to clone and read raw text
+          res.clone().text().then(txt => {
+            console.log("Login response raw text:", txt);
+          }).catch(e => {
+            console.warn("Could not read raw response text:", e);
+          });
+          if (!res.ok) {
+            throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+          }
+          return res.json();
+        })
+        .then(data => {
+          console.log("Login response data:", data);
+          
+          if (data.access_token) {
+            console.log("Login successful - token received");
+            token = data.access_token;
+            localStorage.setItem("authToken", data.access_token); // Store in localStorage
+            lastLoginTime = new Date().toISOString();
+            
+            updateOperationStatus("Login Success", `Token received, expires in ${data.expires_in || "unknown"} seconds`);
+            onStatus("Authenticated", true);
+            
+            if (enableHeartbeat) {
+              setupHeartbeat(baseUrl);
+            }
+            
+            // Attempt new SignalR connection to the entered base URL
+            console.log("Attempting new SignalR connection to entered base URL...");
+            updateOperationStatus("SignalR Reconnection", "Establishing new connection...");
+            
+            try {
+              // Close existing connection if any
+              if (connection && connection.state) {
+                console.log("Closing existing SignalR connection...");
+                connection.stop();
+              }
+              
+              // Reset connection state
+              connection = null;
+              hub = null;
+              connectionId = null;
+              isConnecting = false;
+              reconnectAttempts = 0;
+              
+              // Initialize new hub connection with the entered base URL
+              initHub({
+                onSubscriptionStatus: (data) => {
+                  console.log("Subscription Status received in login:", data);
+                  log(`[SUBSCRIPTION STATUS] Key: ${data.Key}, ErrorCode: ${data.ErrorCode}, RequestId: ${data.RequestId}`);
+                },
+                onValueUpdate: (data) => {
+                  console.log("Value Update received in login:", data);
+                  log(`[VALUE UPDATE] Received ${data.length} value updates`);
+                },
+                onEventUpdate: (data) => {
+                  console.log("Event Update received in login:", data);
+                  log(`[EVENT UPDATE] Received ${data.length} event updates`);
+                },
+                onCommandUpdate: (data) => {
+                  console.log("Command Update received in login:", data);
+                  log(`[COMMAND UPDATE] Received ${data.length} command updates`);
+                },
+                onSystemBrowserChange: (data) => {
+                  console.log("System browser change received in login:", data);
+                  log(`[SYSTEM BROWSER CHANGE] ${JSON.stringify(data, null, 2)}`);
+                },
+                onEventReceived: (data) => {
+                  console.log("Legacy Event received in login:", data);
+                  log(JSON.stringify(data, null, 2));
+                },
+                onLegacyCommandUpdate: (data) => {
+                  console.log("Legacy Command update received in login:", data);
+                  log(JSON.stringify(data, null, 2));
+                }
+              }).then((newConnectionId) => {
+                connectionId = newConnectionId;
+                console.log("New SignalR connection established successfully. ID:", connectionId);
+                updateOperationStatus("SignalR Reconnection Success", `Connected with ID: ${connectionId}`);
+              }).catch((error) => {
+                console.error("Failed to establish new SignalR connection:", error);
+                logError(error, "SignalR Reconnection");
+                updateOperationStatus("SignalR Reconnection Failed", error.message);
+                // Don't fail the login if SignalR connection fails
+              });
+              
+              console.log("New SignalR connection established successfully. ID:", connectionId);
+              updateOperationStatus("SignalR Reconnection Success", `Connected with ID: ${connectionId}`);
+              
+            } catch (error) {
+              console.error("Failed to establish new SignalR connection:", error);
+              logError(error, "SignalR Reconnection");
+              updateOperationStatus("SignalR Reconnection Failed", error.message);
+              // Don't fail the login if SignalR connection fails
+            }
+            
+            // Auto-load views after successful login
+            console.log("Auto-loading views after successful login...");
+            updateOperationStatus("Auto-Load", "Loading System Browser views...");
+            
+            // Ensure System Browser tab is visible
+            const systemBrowserTab = document.getElementById("systemBrowserTab");
+            if (systemBrowserTab) {
+              systemBrowserTab.style.display = "block";
+              console.log("System Browser tab is now visible");
+            } else {
+              console.error("System Browser tab element not found!");
+            }
+            
+            // Fetch systems first, then load views
+            fetchSystems().then(() => {
+              // Wait longer for the DOM to update, then load views
+              setTimeout(() => {
+                console.log("Timeout completed, checking DOM elements...");
+                const viewsDropdown = document.getElementById("viewsDropdown");
+                const viewLoadStatus = document.getElementById("viewLoadStatus");
+                const systemsDropdown = document.getElementById("systemsDropdown");
+                console.log("viewsDropdown found after timeout:", !!viewsDropdown);
+                console.log("viewLoadStatus found after timeout:", !!viewLoadStatus);
+                console.log("systemsDropdown found after timeout:", !!systemsDropdown);
+                console.log("systemsDropdown value:", systemsDropdown ? systemsDropdown.value : "null");
+                
+                if (viewsDropdown && viewLoadStatus && systemsDropdown && systemsDropdown.value) {
+                  console.log("DOM elements ready, calling loadViews...");
+                  loadViews(true);
+                } else {
+                  console.error("DOM elements still not found or no system selected after timeout!");
+                  // Try one more time with a longer delay
+                  setTimeout(() => {
+                    console.log("Second attempt to load views...");
+                    if (systemsDropdown && systemsDropdown.value) {
+                      loadViews(true);
+                    } else {
+                      console.error("Still no system selected, cannot load views");
+                    }
+                  }, 1000);
+                }
+              }, 1000);
+            }).catch(err => {
+              console.error("Error fetching systems:", err);
+            });
+            
+            return data;
+          } else {
+            const error = "No access token in response";
+            console.error(error, data);
+            logError(error, "Login Response");
+            onStatus("Login failed - no token received", false);
+            throw new Error(error);
+          }
+        })
+        .catch(err => {
+          console.error("Login error:", err);
+          if (err instanceof TypeError && err.message === "Failed to fetch") {
+            console.error("[DEBUG] This is usually a CORS, network, or certificate error.");
+            if (window.location.protocol === "file:") {
+              console.error("[DEBUG] You are running from file:// protocol. Use a local web server.");
+            }
+          }
+          logError(err, "Login Request");
+          onStatus(`Error logging in: ${err.message}`, false);
+          throw err;
+        });
+    }
 	
 	function setupHeartbeat(baseUrl) {
   console.log("Setting up token heartbeat...");
