@@ -931,13 +931,13 @@ async function corsFetch(url, options) {
 				const hubsUrlObj = new URL(hubsUrl, window.location.href);
 				const hubsOrigin = `${hubsUrlObj.protocol}//${hubsUrlObj.host}`;
 				if (currentOrigin !== hubsOrigin) {
-				  fetchOptions.credentials = 'include';
+				  console.log('Cross-origin hubs probe detected; using default credentials policy (omit)');
 				}
 			  } catch (e) {
 				// If URL parsing fails, assume same-origin
 			  }
 
-			  const response = await fetch(hubsUrl, fetchOptions);
+			  const response = await corsFetch(hubsUrl, fetchOptions);
 
 			  if (response.ok) {
 				const hubsText = await response.text();
@@ -1090,8 +1090,7 @@ async function corsFetch(url, options) {
         const loginUrlObj = new URL(loginUrl, window.location.href);
         const loginOrigin = `${loginUrlObj.protocol}//${loginUrlObj.host}`;
         if (currentOrigin !== loginOrigin) {
-          fetchOptions.credentials = "include"; // Include credentials for CORS
-          console.log("⚠️ Cross-origin login request - CORS credentials included");
+          console.log("⚠️ Cross-origin login request detected; using bearer-token CORS policy (credentials omitted)");
         }
       } catch (e) {
         // If URL parsing fails, assume same-origin
@@ -1360,7 +1359,7 @@ async function corsFetch(url, options) {
      * CLIENT-SIDE (This code):
      * - Automatically detects cross-origin requests (different protocol, domain, or port)
      * - Configures SignalR connection.start() with CORS options if needed
-     * - Adds credentials: 'include' to fetch requests for cross-origin requests
+     * - Uses bearer-token CORS requests with credentials omitted by default
      * - Provides fallback to jsonp mode if server doesn't support CORS
      * 
      * SERVER-SIDE REQUIREMENTS:
@@ -1368,7 +1367,7 @@ async function corsFetch(url, options) {
      * 
      * 1. For HTTP/Fetch requests:
      *    - Access-Control-Allow-Origin: <client-origin> or *
-     *    - Access-Control-Allow-Credentials: true (if using credentials)
+     *    - Access-Control-Allow-Credentials: true (only if credentialed requests are enabled)
      *    - Access-Control-Allow-Methods: GET, POST, OPTIONS
      *    - Access-Control-Allow-Headers: Content-Type, Authorization
      *    - Access-Control-Max-Age: 86400 (optional, for preflight caching)
@@ -1376,7 +1375,7 @@ async function corsFetch(url, options) {
      * 2. For WebSocket connections:
      *    - Must support CORS for WebSocket upgrade requests
      *    - Access-Control-Allow-Origin header in WebSocket handshake
-     *    - Access-Control-Allow-Credentials: true if using credentials
+     *    - Access-Control-Allow-Credentials: true if credentialed WebSocket auth is enabled
      * 
      * 3. For SignalR negotiate/connect/start endpoints:
      *    - All SignalR endpoints must support CORS
@@ -1650,7 +1649,7 @@ function initHub(onHandlers) {
       const url = constructApiUrl(baseUrl, `propertyvalues/${encodeURIComponent(objectId)}?${params.toString()}`);
       console.log('Loading properties from:', url);
       
-      fetch(url, {
+      corsFetch(url, {
         method: 'GET',
         headers: apiHeaders()
       })
@@ -1841,7 +1840,7 @@ function initHub(onHandlers) {
         try {
           // POST to /relateditems with the current node.ObjectId
           const url = baseUrl.replace(/\/$/, '') + '/relateditems';
-          const res = await fetch(url, {
+          const res = await corsFetch(url, {
             method: 'POST',
             headers: {
               'Authorization': `Bearer ${authToken}`,
@@ -2103,7 +2102,7 @@ function initHub(onHandlers) {
         });
       }
       
-      return fetch(url, {
+      return corsFetch(url, {
         method: "POST",
         headers: headers,
         body: jsonBody
@@ -2231,7 +2230,7 @@ function initHub(onHandlers) {
         fetchOptions.body = body;
       }
       
-      return fetch(url, fetchOptions)
+      return corsFetch(url, fetchOptions)
       .then(res => {
         console.log(`Unsubscribe response status: ${res.status} ${res.statusText}`);
         console.log("Response headers:", Object.fromEntries(res.headers.entries()));
@@ -2541,7 +2540,7 @@ function initHub(onHandlers) {
       endpoints.forEach((endpoint, index) => {
         console.log(`Testing endpoint ${index + 1}: ${endpoint}`);
         
-        fetch(endpoint)
+        corsFetch(endpoint)
           .then(res => {
             console.log(`✅ Endpoint ${endpoint} - Status: ${res.status} ${res.statusText}`);
             if (res.ok) {
@@ -2645,7 +2644,7 @@ function initHub(onHandlers) {
         const url = constructApiUrl(baseUrl, `systembrowser?systemId=${selectedSystemId}`);
         console.log('Loading views from:', url);
         
-        const response = await fetch(url, {
+        const response = await corsFetch(url, {
           method: 'GET',
           headers: {
             'Authorization': `Bearer ${authToken}`,
@@ -2790,7 +2789,7 @@ function initHub(onHandlers) {
       console.log('Using auth token:', token ? 'Present' : 'Missing');
       console.log('Auth headers:', apiHeaders());
       
-      fetch(url, {
+      corsFetch(url, {
         method: 'GET',
         headers: apiHeaders()
       })
@@ -2946,7 +2945,7 @@ function initHub(onHandlers) {
       
       try {
         systemsDropdown.innerHTML = '<option value="">Loading systems...</option>';
-        const response = await fetch(url, {
+        const response = await corsFetch(url, {
           headers: { 'Authorization': `Bearer ${authToken}` }
         });
         if (!response.ok) throw new Error('Failed to fetch systems');
@@ -3012,7 +3011,7 @@ function initHub(onHandlers) {
         const url = constructApiUrl(baseUrl, `systembrowser/${selectedSystemId}/${selectedViewId}/${encodeURIComponent(designation)}`);
         console.log('Navigating to:', url);
         
-        const response = await fetch(url, {
+        const response = await corsFetch(url, {
           method: 'GET',
           headers: {
             'Authorization': `Bearer ${authToken}`,
@@ -3078,7 +3077,7 @@ function initHub(onHandlers) {
         const url = constructApiUrl(baseUrl, `propertyvalues/${encodeURIComponent(propertyId)}?${params.toString()}`);
         console.log('Loading properties from:', url);
         
-        const response = await fetch(url, {
+        const response = await corsFetch(url, {
           method: 'GET',
           headers: {
             'Authorization': `Bearer ${authToken}`,
@@ -3112,12 +3111,12 @@ function initHub(onHandlers) {
         const graphicsUrl = constructApiUrl(baseUrl, `graphics/${encodeURIComponent(objectId)}`);
         const graphicsStatus = graphicsPanel.querySelector('#graphicsStatus');
         try {
-          const gRes = await fetch(graphicsUrl, { headers: { 'Authorization': `Bearer ${authToken}` } });
+          const gRes = await corsFetch(graphicsUrl, { headers: { 'Authorization': `Bearer ${authToken}` } });
           if (gRes.status === 200) {
             graphicsStatus.textContent = 'Graphical object found. Loading related graphics...';
             // 3. Get related graphic item IDs
             const itemIdsUrl = constructApiUrl(baseUrl, `graphics/itemIds/${encodeURIComponent(designation)}`);
-            const itemIdsRes = await fetch(itemIdsUrl, { headers: { 'Authorization': `Bearer ${authToken}` } });
+            const itemIdsRes = await corsFetch(itemIdsUrl, { headers: { 'Authorization': `Bearer ${authToken}` } });
             if (itemIdsRes.status === 200) {
               const items = await itemIdsRes.json();
               if (Array.isArray(items) && items.length > 0) {
@@ -3185,7 +3184,7 @@ function initHub(onHandlers) {
         svgDiv.innerHTML = 'Loading SVG...';
         try {
           const url = constructApiUrl(baseUrl, `graphics/items/${encodeURIComponent(objectId)}`);
-          const res = await fetch(url, { headers: { 'Authorization': `Bearer ${authToken}` } });
+          const res = await corsFetch(url, { headers: { 'Authorization': `Bearer ${authToken}` } });
           if (res.status === 200) {
             const xml = await res.text();
             // Extract all <svg>...</svg> from <graphic> sections
@@ -3974,7 +3973,7 @@ function initHub(onHandlers) {
           fetchOptions.body = body;
         }
         
-        const response = await fetch(url, fetchOptions);
+        const response = await corsFetch(url, fetchOptions);
         
         // ENHANCED DEBUGGING: Log full unsubscribe response details
         console.log('=== ENHANCED UNSUBSCRIBE RESPONSE DEBUG ===');
@@ -4217,17 +4216,16 @@ function initHub(onHandlers) {
         
         // Add CORS support for cross-origin requests
         if (isCrossOriginFetch) {
-          // credentials: 'include' - includes cookies/credentials in CORS requests
-          // This requires server to have: Access-Control-Allow-Credentials: true
-          // Use 'same-origin' if not sending credentials
-          fetchOptions.credentials = 'include'; // Use 'same-origin' if server doesn't support credentials
-          console.log('⚠️ CROSS-ORIGIN FETCH REQUEST - Using credentials: include');
+          // Bearer-token requests normally do not need cookie credentials.
+          // credentials: 'omit' avoids requiring Access-Control-Allow-Credentials.
+          fetchOptions.credentials = 'omit';
+          console.log('⚠️ CROSS-ORIGIN FETCH REQUEST - Using credentials: omit');
           console.log('   - Server must support CORS headers');
-          console.log('   - Required: Access-Control-Allow-Origin, Access-Control-Allow-Credentials: true');
-          console.log('   - If credentials not needed, change to: credentials: "same-origin"');
+          console.log('   - Required: Access-Control-Allow-Origin');
+          console.log('   - Credentials are omitted because Bearer token auth is used');
         }
         
-        const response = await fetch(url, fetchOptions);
+        const response = await corsFetch(url, fetchOptions);
         
         if (!response.ok) {
           const errorText = await response.text();
@@ -4331,7 +4329,7 @@ function initHub(onHandlers) {
           try {
             const params = new URLSearchParams({ readAllProperties: 'false' });
             const valueUrl = constructApiUrl(baseUrl, `propertyvalues/${encodeURIComponent(propertyId)}?${params.toString()}`);
-            const valueRes = await fetch(valueUrl, {
+            const valueRes = await corsFetch(valueUrl, {
               method: 'GET',
               headers: {
                 'Authorization': `Bearer ${authToken}`,
@@ -4968,7 +4966,7 @@ Event Details:
         const url = constructApiUrl(baseUrl, `systembrowser/${selectedSystemId}/${viewId}/${encodeURIComponent(viewDesignation)}`);
         console.log('Loading nodes from:', url);
         
-        const response = await fetch(url, {
+        const response = await corsFetch(url, {
           method: 'GET',
           headers: {
             'Authorization': `Bearer ${authToken}`,
@@ -5115,7 +5113,7 @@ Event Details:
           const headers = apiHeaders();
           const jsonBody = JSON.stringify(filter);
           updateOperationStatus('Subscribe', `Subscribing to operator tasks`);
-          fetch(url, {
+          corsFetch(url, {
             method: "POST",
             headers,
             body: jsonBody
@@ -5155,7 +5153,7 @@ Event Details:
           const headers = apiHeaders();
           const jsonBody = JSON.stringify(eventFilter);
           updateOperationStatus('Subscribe', `Subscribing to events with advanced filter`);
-          fetch(url, {
+          corsFetch(url, {
             method: "POST",
             headers,
             body: jsonBody
@@ -5204,7 +5202,7 @@ Event Details:
           url += `/sr/operatortaskssubscriptions/${encodeURIComponent(connectionId)}`;
           const headers = apiHeaders();
           updateOperationStatus('Unsubscribe', `Unsubscribing from operator tasks`);
-          fetch(url, {
+          corsFetch(url, {
             method: "DELETE",
             headers
           })
@@ -5288,7 +5286,7 @@ Event Details:
           graphicsPanel.appendChild(div);
         } else if (graphic.url) {
           // If it's a URL, fetch and insert
-          fetch(graphic.url).then(res => res.text()).then(svg => {
+          corsFetch(graphic.url).then(res => res.text()).then(svg => {
             const div = document.createElement('div');
             div.innerHTML = svg;
             graphicsPanel.appendChild(div);
@@ -5330,8 +5328,8 @@ Event Details:
     };
     async function fetchEventCategories(baseUrl, authToken) {
       try {
-        const url = baseUrl.replace(/\/$/, '') + '/events/eventcategories';
-        const res = await fetch(url, { headers: { 'Authorization': `Bearer ${authToken}` } });
+        const url = buildApiUrl(baseUrl, 'events/eventcategories');
+        const res = await corsFetch(url, { headers: { 'Authorization': `Bearer ${authToken}` } });
         if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
         const data = await res.json();
         eventCategoryLookup = {};
@@ -5390,11 +5388,11 @@ Event Details:
         connectionId: connectionId
       });
       const baseUrl = document.getElementById('baseUrl').value.trim();
-      const url = baseUrl.replace(/\/$/, '') + `/sr/eventssubscriptions/channelize/${requestId}/${connectionId}`;
+      const url = buildApiUrl(baseUrl, `sr/eventssubscriptions/channelize/${requestId}/${connectionId}`);
       const authToken = localStorage.getItem('authToken');
       console.log('[EVENT SUBSCRIBE] Subscribing to events for object:', objectId, 'with filter:', eventFilter, 'URL:', url);
       appendToDataWindow('[EVENT SUBSCRIBE] Subscribing to events', { objectId, filter: eventFilter, url });
-      fetch(url, {
+      corsFetch(url, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${authToken}`,
