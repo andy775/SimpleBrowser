@@ -195,6 +195,21 @@
       font-family: 'Courier New', monospace;
       font-size: 12px;
     }
+    #corsDiagnosticsOutput {
+      background-color: #f8f9fa;
+      border: 1px solid #dee2e6;
+      border-radius: 5px;
+      padding: 10px;
+      margin-top: 10px;
+      font-family: 'Courier New', monospace;
+      font-size: 12px;
+      max-height: 260px;
+      overflow-y: auto;
+    }
+    .cors-diag-pass { color: #28a745; font-weight: bold; }
+    .cors-diag-warn { color: #e67e22; font-weight: bold; }
+    .cors-diag-fail { color: #dc3545; font-weight: bold; }
+    .cors-diag-skip { color: #6c757d; font-weight: bold; }
   </style>
 </head>
 <body>
@@ -322,6 +337,17 @@
       <label><input type="checkbox" id="heartbeat" checked /> Enable Token Heartbeat</label><br><br>
       <button id="loginBtn">Login</button>
       <div id="authStatus"></div>
+    </fieldset>
+    
+    <fieldset>
+      <legend>CORS Diagnostics</legend>
+      <div style="font-size: 12px; color: #555; margin-bottom: 8px;">
+        Tests cross-origin reachability for key endpoints. HTTP errors (401/403/etc.) still indicate CORS is working if the response is visible.
+      </div>
+      <button id="runCorsDiagnosticsBtn" style="background-color: #17a2b8;">Run CORS Diagnostics</button>
+      <button id="clearCorsDiagnosticsBtn" style="background-color: #6c757d;">Clear</button>
+      <div id="corsDiagnosticsSummary" style="margin-top: 8px; font-size: 12px; color: #666;">No diagnostics run yet.</div>
+      <div id="corsDiagnosticsOutput">Diagnostics output will appear here.</div>
     </fieldset>
     <script>
       // Your existing global variable
@@ -674,6 +700,196 @@ async function corsFetch(url, options) {
   return fetch(url, opts);
 }
 
+function escapeHtml(text) {
+  return String(text || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function isCrossOriginUrl(url) {
+  try {
+    const target = new URL(url, window.location.href);
+    return target.origin !== window.location.origin;
+  } catch (e) {
+    return false;
+  }
+}
+
+function renderCorsDiagnostics(results) {
+  const output = document.getElementById("corsDiagnosticsOutput");
+  const summary = document.getElementById("corsDiagnosticsSummary");
+  if (!output || !summary) return;
+
+  const totals = results.reduce((acc, row) => {
+    acc[row.level] = (acc[row.level] || 0) + 1;
+    return acc;
+  }, {});
+
+  summary.innerHTML = `
+    <strong>Run complete:</strong>
+    <span class="cors-diag-pass">pass ${totals.pass || 0}</span>,
+    <span class="cors-diag-warn">warn ${totals.warn || 0}</span>,
+    <span class="cors-diag-fail">fail ${totals.fail || 0}</span>,
+    <span class="cors-diag-skip">skip ${totals.skip || 0}</span>
+  `;
+
+  const lines = results.map(r => {
+    const css = r.level === "pass"
+      ? "cors-diag-pass"
+      : r.level === "warn"
+        ? "cors-diag-warn"
+        : r.level === "skip"
+          ? "cors-diag-skip"
+          : "cors-diag-fail";
+
+    return `
+      <div style="margin-bottom: 8px; border-bottom: 1px dashed #ddd; padding-bottom: 6px;">
+        <div><span class="${css}">[${escapeHtml(r.level.toUpperCase())}]</span> <strong>${escapeHtml(r.name)}</strong> (${escapeHtml(r.method)} ${escapeHtml(r.crossOrigin ? "cross-origin" : "same-origin")})</div>
+        <div style="color:#555;">URL: ${escapeHtml(r.url)}</div>
+        <div style="color:#333;">${escapeHtml(r.message)}</div>
+      </div>
+    `;
+  });
+
+  output.innerHTML = lines.join("") || "No diagnostics output.";
+}
+
+async function runCorsDiagnostics() {
+  const baseUrl = document.getElementById("baseUrl").value.trim();
+  const runBtn = document.getElementById("runCorsDiagnosticsBtn");
+  const summary = document.getElementById("corsDiagnosticsSummary");
+  const output = document.getElementById("corsDiagnosticsOutput");
+
+  if (!baseUrl) {
+    if (summary) summary.innerHTML = '<span class="cors-diag-fail">Base URL is required.</span>';
+    if (output) output.textContent = "Enter a Base URL first.";
+    return;
+  }
+
+  const authToken = localStorage.getItem("authToken");
+  if (runBtn) runBtn.disabled = true;
+  if (summary) summary.textContent = "Running diagnostics...";
+  if (output) output.textContent = "Running checks...";
+
+  const signalrUrl = buildSignalRUrl(baseUrl);
+  const checks = [
+    {
+      name: "SignalR hubs probe",
+      method: "GET",
+      url: `${signalrUrl}/hubs`,
+      options: { method: "GET", headers: { "Content-Type": "application/json" } },
+      requiresToken: false
+    },
+    {
+      name: "Token endpoint reachability",
+      method: "POST",
+      url: buildApiUrl(baseUrl, "token"),
+      options: {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8" },
+        // intentionally invalid credentials; endpoint must still be reachable for CORS validation
+        body: "grant_type=password&username=cors_diag&password=invalid"
+      },
+      requiresToken: false
+    },
+    {
+      name: "Systems endpoint",
+      method: "GET",
+      url: buildApiUrl(baseUrl, "systems"),
+      options: {
+        method: "GET",
+        headers: authToken ? { "Authorization": `Bearer ${authToken}` } : {}
+      },
+      requiresToken: true
+    },
+    {
+      name: "Heartbeat endpoint",
+      method: "POST",
+      url: buildApiUrl(baseUrl, "Heartbeat"),
+      options: {
+        method: "POST",
+        headers: authToken ? { "Authorization": `Bearer ${authToken}`, "Content-Type": "application/json" } : { "Content-Type": "application/json" },
+        body: "{}"
+      },
+      requiresToken: true
+    },
+    {
+      name: "Event categories endpoint",
+      method: "GET",
+      url: buildApiUrl(baseUrl, "events/eventcategories"),
+      options: {
+        method: "GET",
+        headers: authToken ? { "Authorization": `Bearer ${authToken}` } : {}
+      },
+      requiresToken: true
+    }
+  ];
+
+  const results = [];
+  for (const check of checks) {
+    const crossOrigin = isCrossOriginUrl(check.url);
+    if (check.requiresToken && !authToken) {
+      results.push({
+        level: "skip",
+        name: check.name,
+        method: check.method,
+        url: check.url,
+        crossOrigin,
+        message: "Skipped: requires auth token. Log in first for this check."
+      });
+      continue;
+    }
+
+    try {
+      const res = await corsFetch(check.url, check.options);
+      if (res.ok) {
+        results.push({
+          level: "pass",
+          name: check.name,
+          method: check.method,
+          url: check.url,
+          crossOrigin,
+          message: `Reachable with HTTP ${res.status} ${res.statusText}.`
+        });
+      } else {
+        results.push({
+          level: "warn",
+          name: check.name,
+          method: check.method,
+          url: check.url,
+          crossOrigin,
+          message: `Endpoint reachable but returned HTTP ${res.status} ${res.statusText}. This is usually auth/business logic, not CORS.`
+        });
+      }
+    } catch (err) {
+      const likelyCors = err instanceof TypeError && String(err.message).includes("Failed to fetch");
+      results.push({
+        level: "fail",
+        name: check.name,
+        method: check.method,
+        url: check.url,
+        crossOrigin,
+        message: likelyCors
+          ? "Request failed before HTTP response (likely CORS, TLS/certificate, DNS, or network)."
+          : `Request failed: ${err.message || err}`
+      });
+    }
+  }
+
+  renderCorsDiagnostics(results);
+  if (runBtn) runBtn.disabled = false;
+}
+
+function clearCorsDiagnostics() {
+  const summary = document.getElementById("corsDiagnosticsSummary");
+  const output = document.getElementById("corsDiagnosticsOutput");
+  if (summary) summary.textContent = "No diagnostics run yet.";
+  if (output) output.textContent = "Diagnostics output will appear here.";
+}
+
     function log(message) {
       const ts = new Date().toISOString();
       const pre = document.querySelector("#log");
@@ -931,13 +1147,13 @@ async function corsFetch(url, options) {
 				const hubsUrlObj = new URL(hubsUrl, window.location.href);
 				const hubsOrigin = `${hubsUrlObj.protocol}//${hubsUrlObj.host}`;
 				if (currentOrigin !== hubsOrigin) {
-				  fetchOptions.credentials = 'include';
+				  console.log('Cross-origin hubs probe detected; using default credentials policy (omit)');
 				}
 			  } catch (e) {
 				// If URL parsing fails, assume same-origin
 			  }
 
-			  const response = await fetch(hubsUrl, fetchOptions);
+			  const response = await corsFetch(hubsUrl, fetchOptions);
 
 			  if (response.ok) {
 				const hubsText = await response.text();
@@ -1073,28 +1289,16 @@ async function corsFetch(url, options) {
         onStatus("Missing login parameters", false);
         return Promise.reject(error);
       }
-			  
-		const loginUrl = buildApiUrl(baseUrl, "token");
-		const response = await corsFetch(loginUrl, {
-		  method: "POST",
-		  headers: {
-			"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"
-		  },
-		  body: `grant_type=password&username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`
-		});
-
-		if (!response.ok) {
-		  throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-		}
-
-		const data = await response.json();
+      
+      const loginUrl = buildApiUrl(baseUrl, "token");
+      console.log("Login URL:", loginUrl);
       
       // Extra debug: log fetch options
-      //const fetchOptions = {
-      //  method: "POST",
-      //  headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      //  body: `grant_type=password&username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`
-      //};
+      const fetchOptions = {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8" },
+        body: `grant_type=password&username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`
+      };
       
       // CORS SUPPORT: Add credentials for cross-origin requests
       const currentOrigin = window.location.origin;
@@ -1102,8 +1306,7 @@ async function corsFetch(url, options) {
         const loginUrlObj = new URL(loginUrl, window.location.href);
         const loginOrigin = `${loginUrlObj.protocol}//${loginUrlObj.host}`;
         if (currentOrigin !== loginOrigin) {
-          fetchOptions.credentials = 'include'; // Include credentials for CORS
-          console.log('⚠️ Cross-origin login request - CORS credentials included');
+          console.log("⚠️ Cross-origin login request detected; using bearer-token CORS policy (credentials omitted)");
         }
       } catch (e) {
         // If URL parsing fails, assume same-origin
@@ -1111,6 +1314,174 @@ async function corsFetch(url, options) {
       
       console.log("Fetch options:", fetchOptions);
       
+      return corsFetch(loginUrl, fetchOptions)
+        .then(res => {
+          console.log("Login response status:", res.status);
+          console.log("Login response headers:", Object.fromEntries(res.headers.entries()));
+          // Extra debug: try to clone and read raw text
+          res.clone().text().then(txt => {
+            console.log("Login response raw text:", txt);
+          }).catch(e => {
+            console.warn("Could not read raw response text:", e);
+          });
+          if (!res.ok) {
+            throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+          }
+          return res.json();
+        })
+        .then(data => {
+          console.log("Login response data:", data);
+          
+          if (data.access_token) {
+            console.log("Login successful - token received");
+            token = data.access_token;
+            localStorage.setItem("authToken", data.access_token); // Store in localStorage
+            lastLoginTime = new Date().toISOString();
+            
+            updateOperationStatus("Login Success", `Token received, expires in ${data.expires_in || "unknown"} seconds`);
+            onStatus("Authenticated", true);
+            
+            if (enableHeartbeat) {
+              setupHeartbeat(baseUrl);
+            }
+            
+            // Attempt new SignalR connection to the entered base URL
+            console.log("Attempting new SignalR connection to entered base URL...");
+            updateOperationStatus("SignalR Reconnection", "Establishing new connection...");
+            
+            try {
+              // Close existing connection if any
+              if (connection && connection.state) {
+                console.log("Closing existing SignalR connection...");
+                connection.stop();
+              }
+              
+              // Reset connection state
+              connection = null;
+              hub = null;
+              connectionId = null;
+              isConnecting = false;
+              reconnectAttempts = 0;
+              
+              // Initialize new hub connection with the entered base URL
+              initHub({
+                onSubscriptionStatus: (data) => {
+                  console.log("Subscription Status received in login:", data);
+                  log(`[SUBSCRIPTION STATUS] Key: ${data.Key}, ErrorCode: ${data.ErrorCode}, RequestId: ${data.RequestId}`);
+                },
+                onValueUpdate: (data) => {
+                  console.log("Value Update received in login:", data);
+                  log(`[VALUE UPDATE] Received ${data.length} value updates`);
+                },
+                onEventUpdate: (data) => {
+                  console.log("Event Update received in login:", data);
+                  log(`[EVENT UPDATE] Received ${data.length} event updates`);
+                },
+                onCommandUpdate: (data) => {
+                  console.log("Command Update received in login:", data);
+                  log(`[COMMAND UPDATE] Received ${data.length} command updates`);
+                },
+                onSystemBrowserChange: (data) => {
+                  console.log("System browser change received in login:", data);
+                  log(`[SYSTEM BROWSER CHANGE] ${JSON.stringify(data, null, 2)}`);
+                },
+                onEventReceived: (data) => {
+                  console.log("Legacy Event received in login:", data);
+                  log(JSON.stringify(data, null, 2));
+                },
+                onLegacyCommandUpdate: (data) => {
+                  console.log("Legacy Command update received in login:", data);
+                  log(JSON.stringify(data, null, 2));
+                }
+              }).then((newConnectionId) => {
+                connectionId = newConnectionId;
+                console.log("New SignalR connection established successfully. ID:", connectionId);
+                updateOperationStatus("SignalR Reconnection Success", `Connected with ID: ${connectionId}`);
+              }).catch((error) => {
+                console.error("Failed to establish new SignalR connection:", error);
+                logError(error, "SignalR Reconnection");
+                updateOperationStatus("SignalR Reconnection Failed", error.message);
+                // Don't fail the login if SignalR connection fails
+              });
+              
+              console.log("New SignalR connection established successfully. ID:", connectionId);
+              updateOperationStatus("SignalR Reconnection Success", `Connected with ID: ${connectionId}`);
+              
+            } catch (error) {
+              console.error("Failed to establish new SignalR connection:", error);
+              logError(error, "SignalR Reconnection");
+              updateOperationStatus("SignalR Reconnection Failed", error.message);
+              // Don't fail the login if SignalR connection fails
+            }
+            
+            // Auto-load views after successful login
+            console.log("Auto-loading views after successful login...");
+            updateOperationStatus("Auto-Load", "Loading System Browser views...");
+            
+            // Ensure System Browser tab is visible
+            const systemBrowserTab = document.getElementById("systemBrowserTab");
+            if (systemBrowserTab) {
+              systemBrowserTab.style.display = "block";
+              console.log("System Browser tab is now visible");
+            } else {
+              console.error("System Browser tab element not found!");
+            }
+            
+            // Fetch systems first, then load views
+            fetchSystems().then(() => {
+              // Wait longer for the DOM to update, then load views
+              setTimeout(() => {
+                console.log("Timeout completed, checking DOM elements...");
+                const viewsDropdown = document.getElementById("viewsDropdown");
+                const viewLoadStatus = document.getElementById("viewLoadStatus");
+                const systemsDropdown = document.getElementById("systemsDropdown");
+                console.log("viewsDropdown found after timeout:", !!viewsDropdown);
+                console.log("viewLoadStatus found after timeout:", !!viewLoadStatus);
+                console.log("systemsDropdown found after timeout:", !!systemsDropdown);
+                console.log("systemsDropdown value:", systemsDropdown ? systemsDropdown.value : "null");
+                
+                if (viewsDropdown && viewLoadStatus && systemsDropdown && systemsDropdown.value) {
+                  console.log("DOM elements ready, calling loadViews...");
+                  loadViews(true);
+                } else {
+                  console.error("DOM elements still not found or no system selected after timeout!");
+                  // Try one more time with a longer delay
+                  setTimeout(() => {
+                    console.log("Second attempt to load views...");
+                    if (systemsDropdown && systemsDropdown.value) {
+                      loadViews(true);
+                    } else {
+                      console.error("Still no system selected, cannot load views");
+                    }
+                  }, 1000);
+                }
+              }, 1000);
+            }).catch(err => {
+              console.error("Error fetching systems:", err);
+            });
+            
+            return data;
+          } else {
+            const error = "No access token in response";
+            console.error(error, data);
+            logError(error, "Login Response");
+            onStatus("Login failed - no token received", false);
+            throw new Error(error);
+          }
+        })
+        .catch(err => {
+          console.error("Login error:", err);
+          if (err instanceof TypeError && err.message === "Failed to fetch") {
+            console.error("[DEBUG] This is usually a CORS, network, or certificate error.");
+            if (window.location.protocol === "file:") {
+              console.error("[DEBUG] You are running from file:// protocol. Use a local web server.");
+            }
+          }
+          logError(err, "Login Request");
+          onStatus(`Error logging in: ${err.message}`, false);
+          throw err;
+        });
+    }
 	
 	function setupHeartbeat(baseUrl) {
   console.log("Setting up token heartbeat...");
@@ -1204,7 +1575,7 @@ async function corsFetch(url, options) {
      * CLIENT-SIDE (This code):
      * - Automatically detects cross-origin requests (different protocol, domain, or port)
      * - Configures SignalR connection.start() with CORS options if needed
-     * - Adds credentials: 'include' to fetch requests for cross-origin requests
+     * - Uses bearer-token CORS requests with credentials omitted by default
      * - Provides fallback to jsonp mode if server doesn't support CORS
      * 
      * SERVER-SIDE REQUIREMENTS:
@@ -1212,7 +1583,7 @@ async function corsFetch(url, options) {
      * 
      * 1. For HTTP/Fetch requests:
      *    - Access-Control-Allow-Origin: <client-origin> or *
-     *    - Access-Control-Allow-Credentials: true (if using credentials)
+     *    - Access-Control-Allow-Credentials: true (only if credentialed requests are enabled)
      *    - Access-Control-Allow-Methods: GET, POST, OPTIONS
      *    - Access-Control-Allow-Headers: Content-Type, Authorization
      *    - Access-Control-Max-Age: 86400 (optional, for preflight caching)
@@ -1220,7 +1591,7 @@ async function corsFetch(url, options) {
      * 2. For WebSocket connections:
      *    - Must support CORS for WebSocket upgrade requests
      *    - Access-Control-Allow-Origin header in WebSocket handshake
-     *    - Access-Control-Allow-Credentials: true if using credentials
+     *    - Access-Control-Allow-Credentials: true if credentialed WebSocket auth is enabled
      * 
      * 3. For SignalR negotiate/connect/start endpoints:
      *    - All SignalR endpoints must support CORS
@@ -1494,7 +1865,7 @@ function initHub(onHandlers) {
       const url = constructApiUrl(baseUrl, `propertyvalues/${encodeURIComponent(objectId)}?${params.toString()}`);
       console.log('Loading properties from:', url);
       
-      fetch(url, {
+      corsFetch(url, {
         method: 'GET',
         headers: apiHeaders()
       })
@@ -1685,7 +2056,7 @@ function initHub(onHandlers) {
         try {
           // POST to /relateditems with the current node.ObjectId
           const url = baseUrl.replace(/\/$/, '') + '/relateditems';
-          const res = await fetch(url, {
+          const res = await corsFetch(url, {
             method: 'POST',
             headers: {
               'Authorization': `Bearer ${authToken}`,
@@ -1947,7 +2318,7 @@ function initHub(onHandlers) {
         });
       }
       
-      return fetch(url, {
+      return corsFetch(url, {
         method: "POST",
         headers: headers,
         body: jsonBody
@@ -2075,7 +2446,7 @@ function initHub(onHandlers) {
         fetchOptions.body = body;
       }
       
-      return fetch(url, fetchOptions)
+      return corsFetch(url, fetchOptions)
       .then(res => {
         console.log(`Unsubscribe response status: ${res.status} ${res.statusText}`);
         console.log("Response headers:", Object.fromEntries(res.headers.entries()));
@@ -2385,7 +2756,7 @@ function initHub(onHandlers) {
       endpoints.forEach((endpoint, index) => {
         console.log(`Testing endpoint ${index + 1}: ${endpoint}`);
         
-        fetch(endpoint)
+        corsFetch(endpoint)
           .then(res => {
             console.log(`✅ Endpoint ${endpoint} - Status: ${res.status} ${res.statusText}`);
             if (res.ok) {
@@ -2489,7 +2860,7 @@ function initHub(onHandlers) {
         const url = constructApiUrl(baseUrl, `systembrowser?systemId=${selectedSystemId}`);
         console.log('Loading views from:', url);
         
-        const response = await fetch(url, {
+        const response = await corsFetch(url, {
           method: 'GET',
           headers: {
             'Authorization': `Bearer ${authToken}`,
@@ -2634,7 +3005,7 @@ function initHub(onHandlers) {
       console.log('Using auth token:', token ? 'Present' : 'Missing');
       console.log('Auth headers:', apiHeaders());
       
-      fetch(url, {
+      corsFetch(url, {
         method: 'GET',
         headers: apiHeaders()
       })
@@ -2790,7 +3161,7 @@ function initHub(onHandlers) {
       
       try {
         systemsDropdown.innerHTML = '<option value="">Loading systems...</option>';
-        const response = await fetch(url, {
+        const response = await corsFetch(url, {
           headers: { 'Authorization': `Bearer ${authToken}` }
         });
         if (!response.ok) throw new Error('Failed to fetch systems');
@@ -2856,7 +3227,7 @@ function initHub(onHandlers) {
         const url = constructApiUrl(baseUrl, `systembrowser/${selectedSystemId}/${selectedViewId}/${encodeURIComponent(designation)}`);
         console.log('Navigating to:', url);
         
-        const response = await fetch(url, {
+        const response = await corsFetch(url, {
           method: 'GET',
           headers: {
             'Authorization': `Bearer ${authToken}`,
@@ -2922,7 +3293,7 @@ function initHub(onHandlers) {
         const url = constructApiUrl(baseUrl, `propertyvalues/${encodeURIComponent(propertyId)}?${params.toString()}`);
         console.log('Loading properties from:', url);
         
-        const response = await fetch(url, {
+        const response = await corsFetch(url, {
           method: 'GET',
           headers: {
             'Authorization': `Bearer ${authToken}`,
@@ -2956,12 +3327,12 @@ function initHub(onHandlers) {
         const graphicsUrl = constructApiUrl(baseUrl, `graphics/${encodeURIComponent(objectId)}`);
         const graphicsStatus = graphicsPanel.querySelector('#graphicsStatus');
         try {
-          const gRes = await fetch(graphicsUrl, { headers: { 'Authorization': `Bearer ${authToken}` } });
+          const gRes = await corsFetch(graphicsUrl, { headers: { 'Authorization': `Bearer ${authToken}` } });
           if (gRes.status === 200) {
             graphicsStatus.textContent = 'Graphical object found. Loading related graphics...';
             // 3. Get related graphic item IDs
             const itemIdsUrl = constructApiUrl(baseUrl, `graphics/itemIds/${encodeURIComponent(designation)}`);
-            const itemIdsRes = await fetch(itemIdsUrl, { headers: { 'Authorization': `Bearer ${authToken}` } });
+            const itemIdsRes = await corsFetch(itemIdsUrl, { headers: { 'Authorization': `Bearer ${authToken}` } });
             if (itemIdsRes.status === 200) {
               const items = await itemIdsRes.json();
               if (Array.isArray(items) && items.length > 0) {
@@ -3029,7 +3400,7 @@ function initHub(onHandlers) {
         svgDiv.innerHTML = 'Loading SVG...';
         try {
           const url = constructApiUrl(baseUrl, `graphics/items/${encodeURIComponent(objectId)}`);
-          const res = await fetch(url, { headers: { 'Authorization': `Bearer ${authToken}` } });
+          const res = await corsFetch(url, { headers: { 'Authorization': `Bearer ${authToken}` } });
           if (res.status === 200) {
             const xml = await res.text();
             // Extract all <svg>...</svg> from <graphic> sections
@@ -3154,6 +3525,23 @@ function initHub(onHandlers) {
         console.log('Test connection button event listener added');
       } else {
         console.error('Test connection button not found!');
+      }
+
+      const corsDiagBtn = document.getElementById("runCorsDiagnosticsBtn");
+      if (corsDiagBtn) {
+        corsDiagBtn.addEventListener("click", async () => {
+          try {
+            await runCorsDiagnostics();
+          } catch (error) {
+            console.error("CORS diagnostics failed:", error);
+            logError(error, "CORS Diagnostics");
+          }
+        });
+      }
+
+      const clearCorsDiagBtn = document.getElementById("clearCorsDiagnosticsBtn");
+      if (clearCorsDiagBtn) {
+        clearCorsDiagBtn.addEventListener("click", clearCorsDiagnostics);
       }
 
       // Set up subscribe button
@@ -3818,7 +4206,7 @@ function initHub(onHandlers) {
           fetchOptions.body = body;
         }
         
-        const response = await fetch(url, fetchOptions);
+        const response = await corsFetch(url, fetchOptions);
         
         // ENHANCED DEBUGGING: Log full unsubscribe response details
         console.log('=== ENHANCED UNSUBSCRIBE RESPONSE DEBUG ===');
@@ -4061,17 +4449,16 @@ function initHub(onHandlers) {
         
         // Add CORS support for cross-origin requests
         if (isCrossOriginFetch) {
-          // credentials: 'include' - includes cookies/credentials in CORS requests
-          // This requires server to have: Access-Control-Allow-Credentials: true
-          // Use 'same-origin' if not sending credentials
-          fetchOptions.credentials = 'include'; // Use 'same-origin' if server doesn't support credentials
-          console.log('⚠️ CROSS-ORIGIN FETCH REQUEST - Using credentials: include');
+          // Bearer-token requests normally do not need cookie credentials.
+          // credentials: 'omit' avoids requiring Access-Control-Allow-Credentials.
+          fetchOptions.credentials = 'omit';
+          console.log('⚠️ CROSS-ORIGIN FETCH REQUEST - Using credentials: omit');
           console.log('   - Server must support CORS headers');
-          console.log('   - Required: Access-Control-Allow-Origin, Access-Control-Allow-Credentials: true');
-          console.log('   - If credentials not needed, change to: credentials: "same-origin"');
+          console.log('   - Required: Access-Control-Allow-Origin');
+          console.log('   - Credentials are omitted because Bearer token auth is used');
         }
         
-        const response = await fetch(url, fetchOptions);
+        const response = await corsFetch(url, fetchOptions);
         
         if (!response.ok) {
           const errorText = await response.text();
@@ -4175,7 +4562,7 @@ function initHub(onHandlers) {
           try {
             const params = new URLSearchParams({ readAllProperties: 'false' });
             const valueUrl = constructApiUrl(baseUrl, `propertyvalues/${encodeURIComponent(propertyId)}?${params.toString()}`);
-            const valueRes = await fetch(valueUrl, {
+            const valueRes = await corsFetch(valueUrl, {
               method: 'GET',
               headers: {
                 'Authorization': `Bearer ${authToken}`,
@@ -4812,7 +5199,7 @@ Event Details:
         const url = constructApiUrl(baseUrl, `systembrowser/${selectedSystemId}/${viewId}/${encodeURIComponent(viewDesignation)}`);
         console.log('Loading nodes from:', url);
         
-        const response = await fetch(url, {
+        const response = await corsFetch(url, {
           method: 'GET',
           headers: {
             'Authorization': `Bearer ${authToken}`,
@@ -4959,7 +5346,7 @@ Event Details:
           const headers = apiHeaders();
           const jsonBody = JSON.stringify(filter);
           updateOperationStatus('Subscribe', `Subscribing to operator tasks`);
-          fetch(url, {
+          corsFetch(url, {
             method: "POST",
             headers,
             body: jsonBody
@@ -4999,7 +5386,7 @@ Event Details:
           const headers = apiHeaders();
           const jsonBody = JSON.stringify(eventFilter);
           updateOperationStatus('Subscribe', `Subscribing to events with advanced filter`);
-          fetch(url, {
+          corsFetch(url, {
             method: "POST",
             headers,
             body: jsonBody
@@ -5048,7 +5435,7 @@ Event Details:
           url += `/sr/operatortaskssubscriptions/${encodeURIComponent(connectionId)}`;
           const headers = apiHeaders();
           updateOperationStatus('Unsubscribe', `Unsubscribing from operator tasks`);
-          fetch(url, {
+          corsFetch(url, {
             method: "DELETE",
             headers
           })
@@ -5132,7 +5519,7 @@ Event Details:
           graphicsPanel.appendChild(div);
         } else if (graphic.url) {
           // If it's a URL, fetch and insert
-          fetch(graphic.url).then(res => res.text()).then(svg => {
+          corsFetch(graphic.url).then(res => res.text()).then(svg => {
             const div = document.createElement('div');
             div.innerHTML = svg;
             graphicsPanel.appendChild(div);
@@ -5174,8 +5561,8 @@ Event Details:
     };
     async function fetchEventCategories(baseUrl, authToken) {
       try {
-        const url = baseUrl.replace(/\/$/, '') + '/events/eventcategories';
-        const res = await fetch(url, { headers: { 'Authorization': `Bearer ${authToken}` } });
+        const url = buildApiUrl(baseUrl, 'events/eventcategories');
+        const res = await corsFetch(url, { headers: { 'Authorization': `Bearer ${authToken}` } });
         if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
         const data = await res.json();
         eventCategoryLookup = {};
@@ -5234,11 +5621,11 @@ Event Details:
         connectionId: connectionId
       });
       const baseUrl = document.getElementById('baseUrl').value.trim();
-      const url = baseUrl.replace(/\/$/, '') + `/sr/eventssubscriptions/channelize/${requestId}/${connectionId}`;
+      const url = buildApiUrl(baseUrl, `sr/eventssubscriptions/channelize/${requestId}/${connectionId}`);
       const authToken = localStorage.getItem('authToken');
       console.log('[EVENT SUBSCRIBE] Subscribing to events for object:', objectId, 'with filter:', eventFilter, 'URL:', url);
       appendToDataWindow('[EVENT SUBSCRIBE] Subscribing to events', { objectId, filter: eventFilter, url });
-      fetch(url, {
+      corsFetch(url, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${authToken}`,
