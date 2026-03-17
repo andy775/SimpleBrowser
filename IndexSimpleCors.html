@@ -195,6 +195,21 @@
       font-family: 'Courier New', monospace;
       font-size: 12px;
     }
+    #corsDiagnosticsOutput {
+      background-color: #f8f9fa;
+      border: 1px solid #dee2e6;
+      border-radius: 5px;
+      padding: 10px;
+      margin-top: 10px;
+      font-family: 'Courier New', monospace;
+      font-size: 12px;
+      max-height: 260px;
+      overflow-y: auto;
+    }
+    .cors-diag-pass { color: #28a745; font-weight: bold; }
+    .cors-diag-warn { color: #e67e22; font-weight: bold; }
+    .cors-diag-fail { color: #dc3545; font-weight: bold; }
+    .cors-diag-skip { color: #6c757d; font-weight: bold; }
   </style>
 </head>
 <body>
@@ -322,6 +337,17 @@
       <label><input type="checkbox" id="heartbeat" checked /> Enable Token Heartbeat</label><br><br>
       <button id="loginBtn">Login</button>
       <div id="authStatus"></div>
+    </fieldset>
+    
+    <fieldset>
+      <legend>CORS Diagnostics</legend>
+      <div style="font-size: 12px; color: #555; margin-bottom: 8px;">
+        Tests cross-origin reachability for key endpoints. HTTP errors (401/403/etc.) still indicate CORS is working if the response is visible.
+      </div>
+      <button id="runCorsDiagnosticsBtn" style="background-color: #17a2b8;">Run CORS Diagnostics</button>
+      <button id="clearCorsDiagnosticsBtn" style="background-color: #6c757d;">Clear</button>
+      <div id="corsDiagnosticsSummary" style="margin-top: 8px; font-size: 12px; color: #666;">No diagnostics run yet.</div>
+      <div id="corsDiagnosticsOutput">Diagnostics output will appear here.</div>
     </fieldset>
     <script>
       // Your existing global variable
@@ -672,6 +698,196 @@ async function corsFetch(url, options) {
 
   opts.headers = Object.assign({}, opts.headers || {});
   return fetch(url, opts);
+}
+
+function escapeHtml(text) {
+  return String(text || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function isCrossOriginUrl(url) {
+  try {
+    const target = new URL(url, window.location.href);
+    return target.origin !== window.location.origin;
+  } catch (e) {
+    return false;
+  }
+}
+
+function renderCorsDiagnostics(results) {
+  const output = document.getElementById("corsDiagnosticsOutput");
+  const summary = document.getElementById("corsDiagnosticsSummary");
+  if (!output || !summary) return;
+
+  const totals = results.reduce((acc, row) => {
+    acc[row.level] = (acc[row.level] || 0) + 1;
+    return acc;
+  }, {});
+
+  summary.innerHTML = `
+    <strong>Run complete:</strong>
+    <span class="cors-diag-pass">pass ${totals.pass || 0}</span>,
+    <span class="cors-diag-warn">warn ${totals.warn || 0}</span>,
+    <span class="cors-diag-fail">fail ${totals.fail || 0}</span>,
+    <span class="cors-diag-skip">skip ${totals.skip || 0}</span>
+  `;
+
+  const lines = results.map(r => {
+    const css = r.level === "pass"
+      ? "cors-diag-pass"
+      : r.level === "warn"
+        ? "cors-diag-warn"
+        : r.level === "skip"
+          ? "cors-diag-skip"
+          : "cors-diag-fail";
+
+    return `
+      <div style="margin-bottom: 8px; border-bottom: 1px dashed #ddd; padding-bottom: 6px;">
+        <div><span class="${css}">[${escapeHtml(r.level.toUpperCase())}]</span> <strong>${escapeHtml(r.name)}</strong> (${escapeHtml(r.method)} ${escapeHtml(r.crossOrigin ? "cross-origin" : "same-origin")})</div>
+        <div style="color:#555;">URL: ${escapeHtml(r.url)}</div>
+        <div style="color:#333;">${escapeHtml(r.message)}</div>
+      </div>
+    `;
+  });
+
+  output.innerHTML = lines.join("") || "No diagnostics output.";
+}
+
+async function runCorsDiagnostics() {
+  const baseUrl = document.getElementById("baseUrl").value.trim();
+  const runBtn = document.getElementById("runCorsDiagnosticsBtn");
+  const summary = document.getElementById("corsDiagnosticsSummary");
+  const output = document.getElementById("corsDiagnosticsOutput");
+
+  if (!baseUrl) {
+    if (summary) summary.innerHTML = '<span class="cors-diag-fail">Base URL is required.</span>';
+    if (output) output.textContent = "Enter a Base URL first.";
+    return;
+  }
+
+  const authToken = localStorage.getItem("authToken");
+  if (runBtn) runBtn.disabled = true;
+  if (summary) summary.textContent = "Running diagnostics...";
+  if (output) output.textContent = "Running checks...";
+
+  const signalrUrl = buildSignalRUrl(baseUrl);
+  const checks = [
+    {
+      name: "SignalR hubs probe",
+      method: "GET",
+      url: `${signalrUrl}/hubs`,
+      options: { method: "GET", headers: { "Content-Type": "application/json" } },
+      requiresToken: false
+    },
+    {
+      name: "Token endpoint reachability",
+      method: "POST",
+      url: buildApiUrl(baseUrl, "token"),
+      options: {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8" },
+        // intentionally invalid credentials; endpoint must still be reachable for CORS validation
+        body: "grant_type=password&username=cors_diag&password=invalid"
+      },
+      requiresToken: false
+    },
+    {
+      name: "Systems endpoint",
+      method: "GET",
+      url: buildApiUrl(baseUrl, "systems"),
+      options: {
+        method: "GET",
+        headers: authToken ? { "Authorization": `Bearer ${authToken}` } : {}
+      },
+      requiresToken: true
+    },
+    {
+      name: "Heartbeat endpoint",
+      method: "POST",
+      url: buildApiUrl(baseUrl, "Heartbeat"),
+      options: {
+        method: "POST",
+        headers: authToken ? { "Authorization": `Bearer ${authToken}`, "Content-Type": "application/json" } : { "Content-Type": "application/json" },
+        body: "{}"
+      },
+      requiresToken: true
+    },
+    {
+      name: "Event categories endpoint",
+      method: "GET",
+      url: buildApiUrl(baseUrl, "events/eventcategories"),
+      options: {
+        method: "GET",
+        headers: authToken ? { "Authorization": `Bearer ${authToken}` } : {}
+      },
+      requiresToken: true
+    }
+  ];
+
+  const results = [];
+  for (const check of checks) {
+    const crossOrigin = isCrossOriginUrl(check.url);
+    if (check.requiresToken && !authToken) {
+      results.push({
+        level: "skip",
+        name: check.name,
+        method: check.method,
+        url: check.url,
+        crossOrigin,
+        message: "Skipped: requires auth token. Log in first for this check."
+      });
+      continue;
+    }
+
+    try {
+      const res = await corsFetch(check.url, check.options);
+      if (res.ok) {
+        results.push({
+          level: "pass",
+          name: check.name,
+          method: check.method,
+          url: check.url,
+          crossOrigin,
+          message: `Reachable with HTTP ${res.status} ${res.statusText}.`
+        });
+      } else {
+        results.push({
+          level: "warn",
+          name: check.name,
+          method: check.method,
+          url: check.url,
+          crossOrigin,
+          message: `Endpoint reachable but returned HTTP ${res.status} ${res.statusText}. This is usually auth/business logic, not CORS.`
+        });
+      }
+    } catch (err) {
+      const likelyCors = err instanceof TypeError && String(err.message).includes("Failed to fetch");
+      results.push({
+        level: "fail",
+        name: check.name,
+        method: check.method,
+        url: check.url,
+        crossOrigin,
+        message: likelyCors
+          ? "Request failed before HTTP response (likely CORS, TLS/certificate, DNS, or network)."
+          : `Request failed: ${err.message || err}`
+      });
+    }
+  }
+
+  renderCorsDiagnostics(results);
+  if (runBtn) runBtn.disabled = false;
+}
+
+function clearCorsDiagnostics() {
+  const summary = document.getElementById("corsDiagnosticsSummary");
+  const output = document.getElementById("corsDiagnosticsOutput");
+  if (summary) summary.textContent = "No diagnostics run yet.";
+  if (output) output.textContent = "Diagnostics output will appear here.";
 }
 
     function log(message) {
@@ -3309,6 +3525,23 @@ function initHub(onHandlers) {
         console.log('Test connection button event listener added');
       } else {
         console.error('Test connection button not found!');
+      }
+
+      const corsDiagBtn = document.getElementById("runCorsDiagnosticsBtn");
+      if (corsDiagBtn) {
+        corsDiagBtn.addEventListener("click", async () => {
+          try {
+            await runCorsDiagnostics();
+          } catch (error) {
+            console.error("CORS diagnostics failed:", error);
+            logError(error, "CORS Diagnostics");
+          }
+        });
+      }
+
+      const clearCorsDiagBtn = document.getElementById("clearCorsDiagnosticsBtn");
+      if (clearCorsDiagBtn) {
+        clearCorsDiagBtn.addEventListener("click", clearCorsDiagnostics);
       }
 
       // Set up subscribe button
